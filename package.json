@@ -1,0 +1,42 @@
+{
+    "name": "caldav-client",
+    "version": "1.0.0",
+    "description": "A lightweight CalDAV client for Node.js with deep iCloud support",
+    "description_zh": "轻量级 CalDAV 客户端，专为 Node.js 设计，深度支持 iCloud",
+    "main": "src/index.js",
+    "files": [
+        "src",
+        "README.md",
+        "README.zh-CN.md",
+        "LICENSE"
+    ],
+    "scripts": {
+        "example": "node example.js",
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "keywords": [
+        "caldav",
+        "calendar",
+        "icalendar",
+        "ics",
+        "vevent",
+        "events",
+        "icloud",
+        "sync",
+        "recurrence"
+    ],
+    "author": "CK",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/ckcoding/caldav-client"
+    },
+    "homepage": "https://github.com/ckcoding/caldav-client#readme",
+    "dependencies": {
+        "fast-xml-parser": "^4.5.0"
+    },
+    "engines": {
+        "node": ">=16.0.0"
+    },
+    "devDependencies": {}
+}
