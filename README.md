@@ -333,3 +333,21 @@ node test-full.js
 ## 📄 License
 
 MIT License
+
+## 📝 Changelog
+
+### v1.1.0
+
+**Fixed**
+
+- 🐛 **VTIMEZONE pollution** (`parseVEvent`): The parser now respects component boundaries and only parses properties inside `BEGIN:VEVENT`. Previously, `DTSTART` lines inside `VTIMEZONE` (e.g. China's 1987 DST rule `DTSTART:19870412T020000`) could silently override the real event start time.
+- 🐛 **Wrong resource path for `getEvent` / `updateEvent` / `deleteEvent`**: Apple iCloud stores events under resource names that are **not** `UID.ics`. All three methods now resolve the real resource href via a UID-filtered `calendar-query` before operating, falling back to a full-list filter when the server rejects UID filtering (412).
+- 🐛 **Floating time parsing**: `DTSTART;TZID=...:YYYYMMDDTHHMMSS` (no `Z` suffix) is now parsed as local time instead of UTC, fixing 8-hour offsets for `TZID=Asia/Shanghai` style values. Also supports `+HHMM`/`-0800` offsets and invalid-date rejection.
+
+**Added**
+
+- ✨ `parseVEvent` now extracts fields that were silently dropped before: `STATUS`, `PRIORITY`, `CATEGORIES`, `URL`, `COMPLETED`, `RRULE` (parsed into an object) and `VALARM` (triggers converted to minutes).
+- ✨ New `getEventsByUid(calendar, uid)` API for UID-based lookup that returns the real resource href.
+- ✨ `updateEvent` / `deleteEvent` write to the real resource path resolved by UID, making updates/deletes reliable on iCloud even when resource names differ from `UID.ics`.
+
+**Why upgrade**: any sync built on 1.0.0 would lose STATUS/PRIORITY/RRULE/VALARM on pull, corrupt event dates to 1987-04-12 (VTIMEZONE bug) for iCloud events with timezone definitions, and silently fail to update/delete events (UID.ics path mismatch).

@@ -300,3 +300,20 @@ node test-full.js
 ## 📄 许可证
 
 MIT License
+
+## 📝 更新日志
+
+### 1.1.0
+
+**修复**
+
+- 🐛 **VTIMEZONE 日期污染**：解析器现在具备组件边界感知，仅解析 `BEGIN:VEVENT` 内部的属性。此前 iCloud 事件 ICS 中 VTIMEZONE 里的历史夏令时定义（如中国 1987 年夏令时 `DTSTART:19870412T020000`）会覆盖事件的真实时间，导致所有带时区的事件日期被错误解析为 1987-04-12。
+- 🐛 **资源路径错误**：Apple iCloud 的事件资源文件名**不是** `UID.ics`。`getEvent` / `updateEvent` / `deleteEvent` 现在通过 UID 过滤的 REPORT 查询解析真实资源路径后再操作，修复了"未找到事件 UID"错误以及更新/删除静默失败的问题。
+- 🐛 **浮点时间解析**：`DTSTART;TZID=...:YYYYMMDDTHHMMSS`（无 Z 后缀）现在按本地时区解析，而非错误的 UTC，修复 8 小时偏移；同时支持 `+0800` 等偏移格式与非法日期拒绝。
+
+**新增**
+
+- ✨ 解析此前被静默丢弃的字段：`STATUS`、`PRIORITY`、`CATEGORIES`、`COMPLETED`、`RRULE`（解析为对象）、`VALARM`（TRIGGER 转换为提前分钟数）。
+- ✨ 新增 `getEventsByUid(calendar, uid)` API：按 UID 属性过滤查询，返回真实资源路径；服务器不支持 UID 过滤时自动回退全量过滤。
+
+**升级原因**：任何基于 1.0.0 的同步逻辑都会在 iCloud 事件上遇到日期污染、字段丢失（状态/优先级/循环/提醒）以及更新与删除静默失败的问题。

@@ -175,28 +175,53 @@ function formatDateToLocalString(date) {
 
 /**
  * 解析 ICS 日期字符串
- * 支持 'YYYYMMDD' 和 'YYYYMMDDTHHMMSSZ' 格式
+ * 支持:
+ * - YYYYMMDD
+ * - YYYYMMDDTHHMMSS
+ * - YYYYMMDDTHHMMSSZ
+ * - YYYYMMDDTHHMMSS+0800 / -0800
  * 返回本地时间字符串格式: 'YYYY-MM-DD HH:mm:ss'
  */
-function parseICSDate(dateStr) {
-    if (!dateStr || dateStr.length < 8) return null;
+function parseICSDate(dateStr, keyPart = '') {
+    if (!dateStr || typeof dateStr !== 'string') return null;
 
-    const year = dateStr.substring(0, 4);
-    const month = dateStr.substring(4, 6);
-    const day = dateStr.substring(6, 8);
+    const trimmed = dateStr.trim();
+    if (!trimmed) return null;
 
-    let date;
-    if (dateStr.includes('T')) {
-        const hour = dateStr.substring(9, 11);
-        const minute = dateStr.substring(11, 13);
-        const second = dateStr.substring(13, 15);
-        // ICS 格式是 UTC 时间，需要转换为本地时间
-        date = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}Z`);
-    } else {
-        date = new Date(`${year}-${month}-${day}`);
+    // 纯日期（全天事件），或显式 VALUE=DATE
+    const isDateOnly = /(?:^|;)VALUE=DATE(?:;|$)/i.test(keyPart) || !trimmed.includes('T');
+    const dateOnlyMatch = trimmed.match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (isDateOnly && dateOnlyMatch) {
+        const [, year, month, day] = dateOnlyMatch;
+        const date = new Date(`${year}-${month}-${day}T00:00:00`);
+        return formatDateToLocalString(date);
     }
 
-    // 转换为本地时间字符串
+    const dateTimeMatch = trimmed.match(
+        /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})(Z|[+-]\d{4})?$/i,
+    );
+    if (!dateTimeMatch) {
+        return null;
+    }
+
+    const [, year, month, day, hour, minute, second, suffix] = dateTimeMatch;
+
+    let date;
+    if (!suffix) {
+        // 无时区后缀属于 floating time（如 DTSTART;TZID=Asia/Shanghai）
+        // 不能强行按 UTC 解析，否则会产生 +8h 偏移。
+        date = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}`);
+    } else if (suffix.toUpperCase() === 'Z') {
+        date = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}Z`);
+    } else {
+        const offset = `${suffix.slice(0, 3)}:${suffix.slice(3, 5)}`;
+        date = new Date(`${year}-${month}-${day}T${hour}:${minute}:${second}${offset}`);
+    }
+
+    if (Number.isNaN(date.getTime())) {
+        return null;
+    }
+
     return formatDateToLocalString(date);
 }
 
@@ -216,7 +241,73 @@ function parseVEvent(icsData) {
         endDate: null,
         created: null,
         lastModified: null,
+        completed: null,
     };
+
+    // 解析 RRULE 字符串为对象
+    function parseRRule(rruleStr) {
+        if (!rruleStr || typeof rruleStr !== 'string') return null;
+        const parts = rruleStr.split(';');
+        const rule = {};
+        for (const part of parts) {
+            const eqIndex = part.indexOf('=');
+            if (eqIndex === -1) continue;
+            const k = part.substring(0, eqIndex).toUpperCase();
+            const v = part.substring(eqIndex + 1);
+            if (!k || !v) continue;
+            switch (k) {
+                case 'FREQ': rule.frequency = v.toUpperCase(); break;
+                case 'INTERVAL': rule.interval = parseInt(v, 10); break;
+                case 'COUNT': rule.count = parseInt(v, 10); break;
+                case 'UNTIL': rule.until = parseICSDate(v, ''); break;
+                case 'BYDAY': rule.byDay = v.split(','); break;
+                case 'BYMONTH': rule.byMonth = v.split(',').map((x) => parseInt(x, 10)); break;
+                case 'BYMONTHDAY': rule.byMonthDay = v.split(',').map((x) => parseInt(x, 10)); break;
+                case 'WKST': rule.weekStart = v.toUpperCase(); break;
+            }
+        }
+        if (!rule.frequency) return null;
+        return rule;
+    }
+
+    // 解析 VALARM 块内行，提取提前分钟数
+    function parseAlarmLines(blockLines) {
+        let minutes = null;
+        let action = null;
+        let description = null;
+        for (const rawLine of blockLines) {
+            const t = rawLine.trim();
+            if (!t) continue;
+            const colon = t.indexOf(':');
+            if (colon === -1) continue;
+            const k = t.substring(0, colon).split(';')[0].toUpperCase();
+            const v = t.substring(colon + 1);
+            if (k === 'TRIGGER') {
+                const m = v.match(/^(-?)P(?:T)?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/i);
+                if (m) {
+                    const sign = m[1] === '-' ? -1 : 1;
+                    const h = parseInt(m[2] || '0', 10);
+                    const min = parseInt(m[3] || '0', 10);
+                    const s = parseInt(m[4] || '0', 10);
+                    minutes = sign * (h * 60 + min + Math.round(s / 60));
+                }
+            } else if (k === 'ACTION') {
+                action = v.toUpperCase();
+            } else if (k === 'DESCRIPTION') {
+                description = v;
+            }
+        }
+        if (minutes === null) return null;
+        return { minutes, action: action || 'DISPLAY', description };
+    }
+
+    // VALARM 块收集状态
+    let inAlarm = false;
+    let alarmLines = [];
+    // VEVENT 组件边界：只解析 VEVENT 块内的属性，
+    // 跳过 VTIMEZONE（Apple 生成的时区定义内含大量历史 DTSTART 行，
+    // 如中国 1987 年夏令时 19870412T020000，不跳过会覆盖真实事件时间）
+    let inVEvent = false;
 
     // 处理 ICS 换行 (Line Folding): 移除 CRLF 后跟的空格或 Tab
     const unfolded = icsData.replace(/\r?\n[ \t]/g, '');
@@ -236,15 +327,66 @@ function parseVEvent(icsData) {
         // 提取属性名 (去除参数, 如 DTSTART;TZID=...)
         const key = keyPart.split(';')[0];
 
+        // 组件边界：仅处理 VEVENT 块内的行
+        if (!inVEvent) {
+            if (key === 'BEGIN' && value.toUpperCase() === 'VEVENT') {
+                inVEvent = true;
+            }
+            continue;
+        }
+        if (key === 'END' && value.toUpperCase() === 'VEVENT') {
+            inVEvent = false;
+            continue;
+        }
+
         switch (key) {
             case 'UID': event.uid = value; break;
             case 'SUMMARY': event.summary = unescapeICS(value); break;
             case 'DESCRIPTION': event.description = unescapeICS(value); break;
             case 'LOCATION': event.location = unescapeICS(value); break;
-            case 'DTSTART': event.startDate = parseICSDate(value); break;
-            case 'DTEND': event.endDate = parseICSDate(value); break;
-            case 'CREATED': event.created = parseICSDate(value); break;
-            case 'LAST-MODIFIED': event.lastModified = parseICSDate(value); break;
+            case 'DTSTART': event.startDate = parseICSDate(value, keyPart); break;
+            case 'DTEND': event.endDate = parseICSDate(value, keyPart); break;
+            case 'CREATED': event.created = parseICSDate(value, keyPart); break;
+            case 'LAST-MODIFIED': event.lastModified = parseICSDate(value, keyPart); break;
+            case 'COMPLETED': event.completed = parseICSDate(value, keyPart); break;
+            case 'STATUS': event.status = value.toUpperCase(); break;
+            case 'PRIORITY': {
+                const p = parseInt(value, 10);
+                if (!Number.isNaN(p)) event.priority = p;
+                break;
+            }
+            case 'CATEGORIES':
+                event.categories = value.split(',').map((c) => c.trim()).filter(Boolean);
+                break;
+            case 'URL': event.url = value; break;
+            case 'RRULE': event.recurrence = parseRRule(value); break;
+        }
+
+        // 收集 VALARM 块内容
+        if (inAlarm) {
+            if (key === 'END' && value.toUpperCase() === 'VALARM') {
+                const alarm = parseAlarmLines(alarmLines);
+                if (alarm) {
+                    if (!event.alarms) event.alarms = [];
+                    event.alarms.push(alarm);
+                }
+                inAlarm = false;
+                alarmLines = [];
+            } else if (key !== 'BEGIN') {
+                alarmLines.push(trimmed);
+            }
+        } else if (key === 'BEGIN' && value.toUpperCase() === 'VALARM') {
+            inAlarm = true;
+            alarmLines = [];
+        }
+    }
+
+    // 兜底：如果 VALARM 块未正常闭合
+    if (inAlarm && alarmLines.length > 0) {
+        const alarm = parseAlarmLines(alarmLines);
+        if (alarm) {
+            if (!event.alarms) event.alarms = [];
+            event.alarms.push(alarm);
         }
     }
 
@@ -770,31 +912,58 @@ END:VCALENDAR
 
 
     /**
-     * 获取单个事件
-     * 使用 calendar-multiget REPORT 只获取指定 UID 的事件
-     * 性能优化：O(1) 复杂度
+     * 按 UID 查询事件（用 UID 属性过滤而非猜测资源路径）
+     * iCloud 的事件资源文件名（href）不等于 UID.ics，必须通过 REPORT 查询真实路径
+     * 优先使用 CalDAV 标准的 UID 属性过滤；若服务器不支持（如 412），回退全量拉取后本地过滤
      */
-    async getEvent(calendar, uid) {
+    async getEventsByUid(calendar, uid) {
         if (!calendar || !calendar.url) {
             throw new Error('无效的日历对象');
         }
 
-        // 构造事件的相对路径 (href)
-        const eventPath = `${calendar.url}${uid}.ics`;
+        const escapeXml = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-        const reportBody = `<?xml version="1.0" encoding="utf-8" ?>
-<c:calendar-multiget xmlns:d="${NAMESPACES.DAV}" xmlns:c="${NAMESPACES.CALDAV}">
+        const calendarUrl = this._makeAbsoluteUrl(calendar.url);
+
+        // 方案 A：CalDAV 标准 UID 属性过滤查询
+        try {
+            const reportBody = `<?xml version="1.0" encoding="utf-8" ?>
+<c:calendar-query xmlns:d="${NAMESPACES.DAV}" xmlns:c="${NAMESPACES.CALDAV}">
   <d:prop>
     <d:getetag />
     <c:calendar-data />
   </d:prop>
-  <d:href>${eventPath}</d:href>
-</c:calendar-multiget>`;
+  <c:filter>
+    <c:comp-filter name="VCALENDAR">
+      <c:comp-filter name="${componentType}">
+        <c:prop-filter name="UID">
+          <c:text-match>${escapeXml(uid)}</c:text-match>
+        </c:prop-filter>
+      </c:comp-filter>
+    </c:comp-filter>
+  </c:filter>
+</c:calendar-query>`;
 
-        const calendarUrl = this._makeAbsoluteUrl(calendar.url);
-        const result = await this.report(calendarUrl, reportBody);
+            const result = await this.report(calendarUrl, reportBody);
+            const events = parseEventsFromReport(result.json);
+            if (events.length > 0) {
+                return events;
+            }
+        } catch (e) {
+            // 服务器不支持 UID 过滤查询，回退到方案 B
+        }
 
-        const events = parseEventsFromReport(result.json);
+        // 方案 B：全量拉取 + 本地按 UID 过滤（对小型日历开销可接受）
+        const all = await this.getCalendarObjects(calendar, {});
+        return (all || []).filter((e) => e.uid === uid);
+    }
+
+    /**
+     * 获取单个事件
+     * 通过 UID 属性过滤查询，返回真实资源路径与事件数据
+     */
+    async getEvent(calendar, uid) {
+        const events = await this.getEventsByUid(calendar, uid);
         return events.length > 0 ? events[0] : null;
     }
 
@@ -833,7 +1002,7 @@ END:VCALENDAR
 
     /**
      * 更新事件
-     * 先获取现有事件，合并新数据，然后重新上传
+     * 先获取现有事件，合并新数据，然后重新上传到真实资源路径
      */
     async updateEvent(calendar, eventUid, eventData) {
         if (!calendar || !calendar.url) {
@@ -849,20 +1018,33 @@ END:VCALENDAR
 
         const icsData = this._buildICS(eventUid, eventData, existingEvent);
 
-        const eventUrl = `${this._makeAbsoluteUrl(calendar.url)}${eventUid}.ics`;
+        // 上传到真实资源路径（iCloud 的资源文件名不等于 UID.ics）
+        const eventUrl = existingEvent.url
+            ? this._makeAbsoluteUrl(existingEvent.url.startsWith('/') ? existingEvent.url : `/${existingEvent.url}`)
+            : `${this._makeAbsoluteUrl(calendar.url)}${eventUid}.ics`;
         await this.put(eventUrl, icsData);
     }
 
     /**
      * 删除事件
-     * 发送 DELETE 请求
+     * 先按 UID 查询真实资源路径，再发送 DELETE 请求
      */
     async deleteEvent(calendar, eventUid) {
         if (!calendar || !calendar.url) {
             throw new Error('无效的日历对象');
         }
 
-        const eventUrl = `${this._makeAbsoluteUrl(calendar.url)}${eventUid}.ics`;
+        let eventUrl = `${this._makeAbsoluteUrl(calendar.url)}${eventUid}.ics`;
+        try {
+            // iCloud 资源文件名不等于 UID.ics，必须先查询真实路径
+            const events = await this.getEventsByUid(calendar, eventUid);
+            if (events.length > 0 && events[0].url) {
+                const href = events[0].url;
+                eventUrl = this._makeAbsoluteUrl(href.startsWith('/') ? href : `/${href}`);
+            }
+        } catch (e) {
+            // 查询失败时退回 UID.ics 猜测路径，由后续 DELETE 返回的 404 走原有容错逻辑
+        }
         await this.delete(eventUrl);
     }
 

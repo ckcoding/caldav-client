@@ -1,7 +1,7 @@
 {
     "name": "caldav-client",
-    "version": "1.0.0",
-    "description": "A lightweight CalDAV client for Node.js with deep iCloud support",
+    "version": "1.1.0",
+    "description": "A lightweight CalDAV client for Node.js with deep iCloud support (VTIMEZONE-safe, full VEVENT field support)",
     "description_zh": "轻量级 CalDAV 客户端，专为 Node.js 设计，深度支持 iCloud",
     "main": "src/index.js",
     "files": [
